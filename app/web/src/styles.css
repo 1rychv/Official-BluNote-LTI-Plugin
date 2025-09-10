@@ -1,0 +1,70 @@
+:root{
+  --bg:#0b1020;
+  --panel:#121a33;
+  --muted:#8ca2c0;
+  --text:#e6eef8;
+  --brand:#3b82f6; /* blue */
+  --ok:#22c55e;
+  --warn:#f59e0b;
+  --danger:#ef4444;
+  --card:#0f162b;
+  --border:rgba(255,255,255,0.08);
+}
+
+html,body,#root{height:100%}
+body{
+  margin:0; background:var(--bg); color:var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial, Helvetica, sans-serif;
+}
+
+.topbar{
+  position:sticky; top:0; z-index:10;
+  display:flex; align-items:center; justify-content:space-between;
+  padding:12px 20px; background:rgba(10,15,30,0.7); backdrop-filter:saturate(160%) blur(8px);
+  border-bottom:1px solid var(--border);
+}
+.brand{display:flex; gap:10px; align-items:center; font-weight:700; letter-spacing:0.3px}
+.brand-dot{width:10px; height:10px; border-radius:50%; background:var(--brand)}
+.container{max-width:980px; margin:0 auto; padding:24px}
+
+.card{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:18px}
+.card + .card{margin-top:16px}
+
+.primary-btn{
+  padding:18px 26px; font-size:20px; font-weight:700; border-radius:12px; border:1px solid transparent;
+  background:linear-gradient(135deg, #ef4444, #f97316); color:white; cursor:pointer;
+  transition:transform 0.05s ease, filter .2s ease, opacity .2s ease;
+}
+.primary-btn:active{transform:scale(0.98)}
+.primary-btn:disabled{opacity:.6; cursor:not-allowed}
+
+.muted{color:var(--muted)}
+.row{display:flex; gap:16px; align-items:center}
+.space{height:16px}
+
+.stat-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:12px}
+.stat{background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:12px}
+.stat .label{font-size:12px; color:var(--muted)}
+.stat .value{font-size:22px; font-weight:800}
+
+.meter-wrap{ position:relative; height:38px; }
+.meter{ position:absolute; left:0; right:0; top:0; height:14px; background:rgba(255,255,255,0.08); border-radius:999px; }
+.meter .fill{height:100%; border-radius:999px; background:linear-gradient(90deg, #22d3ee, #3b82f6)}
+.meter .threshold{position:absolute; top:-3px; bottom:-3px; width:2px; background:var(--warn)}
+
+.meter-label{ position:absolute; top:20px; font-size:12px; color:var(--muted); }
+.meter-label.left{ left:0; transform:translateX(0) }
+.meter-label.center{ transform:translateX(-50%) }
+.meter-label.right{ right:0 }
+
+.banner{padding:12px 14px; border-radius:10px; border:1px solid var(--border); background:rgba(239,68,68,0.1)}
+.badge{padding:2px 8px; border-radius:999px; border:1px solid var(--border); font-size:12px; color:var(--muted)}
+
+.tutoring{background:rgba(59,130,246,0.08); border-color:rgba(59,130,246,0.3)}
+.tutoring h3{margin-top:0}
+
+.footnote{font-size:12px; color:var(--muted)}
+
+@media (max-width:720px){
+  .stat-grid{grid-template-columns:1fr}
+}

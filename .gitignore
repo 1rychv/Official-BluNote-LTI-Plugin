@@ -1,0 +1,18 @@
+# Node / Vite
+app/web/node_modules/
+app/web/dist/
+
+# Python venv
+app/server-py/.venv/
+
+# MacOS
+.DS_Store
+
+# Logs
+*.log
+app/server/*.log
+app/server-py/*.log
+
+# Env files
+**/.env
+
