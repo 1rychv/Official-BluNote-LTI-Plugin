@@ -1,6 +1,6 @@
 # BluNote (MVP Dev Build)
 
-This is a minimal implementation of the BluNote web app per SPEC-1 — focusing on the realtime confusion button, instructor dashboard, threshold logic, and a tutoring stub. By request, the backend is provided in Python (FastAPI + Socket.IO). LTI 1.3 endpoints are not included in this dev build; integrate them later per the specs.
+This is a minimal implementation of the BluNote web app per SPEC-1 — focusing on the realtime confusion button, instructor dashboard, threshold logic, and a tutoring stub. By request, the backend is provided in Python (FastAPI + Socket.IO). An initial LTI 1.3 gateway (OIDC + Launch scaffold, JWKS, config, and a dev launch route) is included for wiring and testing.
 
 ## Stack
 - Backend: Node.js (Express + Socket.IO)
@@ -37,7 +37,8 @@ npm run dev
 - Instructor dashboard shows live metrics and alerts when threshold (default 25%) is exceeded.
 - Cooldown of 3 minutes between triggers per course.
 - Tutoring stub: when threshold triggers, each confused student receives a simple tutoring panel pushed via WebSocket.
- - Auto roster: denominator auto-uses active connected students within the window; falls back to manual roster if no presence is detected (e.g., testing with only instructor open).
+- Auto roster: denominator auto-uses active connected students within the window; falls back to manual roster if no presence is detected (e.g., testing with only instructor open).
+- LTI gateway (scaffold): `/lti/oidc_login`, `/lti/launch`, `/lti/.well-known/jwks.json`, `/lti/config`, and `/lti/dev/launch` for local testing without Moodle.
 
 ## Configuration
 Backend env (`server-py/.env`):
@@ -48,11 +49,17 @@ Backend env (`server-py/.env`):
 - `DEBOUNCE_SEC` (default 20)
 - `COOLDOWN_SEC` (default 180)
 
+LTI gateway env (optional now):
+- `FRONTEND_BASE` (default `ALLOWED_ORIGIN`)
+- `PLATFORM_ISSUER`, `PLATFORM_CLIENT_ID`, `PLATFORM_AUTH_LOGIN_URL`, `PLATFORM_JWKS_URL`, `PLATFORM_DEPLOYMENT_ID`
+- `TOOL_REDIRECT_URI` (default `http://localhost:4000/lti/launch`)
+- `LTI_PRIVATE_KEY_PEM`, `LTI_KID` (if not set, a dev key is generated for JWKS)
+
 Frontend env (`web/.env` optional):
 - `VITE_API_BASE` (default http://localhost:4000)
 
 ## Next steps (per SPEC)
-- Add LTI 1.3 endpoints (OIDC login + Launch) using `pylti1p3` in a dedicated Gateway service.
+- Complete LTI 1.3 flows (OIDC + Launch + Deep Linking) using `pylti1p3`, wired to real Moodle config.
 - Replace in-memory state with Redis for counters and Postgres for events/users.
 - Implement NRPS (roster) and AGS (grade passback) adapters.
 - Add Tutoring Orchestrator with real LLM calls (opt-in via API key).

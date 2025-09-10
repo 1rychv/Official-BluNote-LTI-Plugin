@@ -4,16 +4,22 @@ from typing import Dict, Any, List, Set
 from urllib.parse import parse_qs
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, APIRouter, Request, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import socketio
+import httpx
+from jose import jwt
+from jose.utils import base64url_encode
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives import serialization
 
 
 load_dotenv()
 
 PORT = int(os.getenv("PORT", "4000"))
 ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "http://localhost:5173")
+FRONTEND_BASE = os.getenv("FRONTEND_BASE") or ALLOWED_ORIGIN
 
 THRESHOLD_PERCENT = int(os.getenv("THRESHOLD_PERCENT", "25"))
 WINDOW_MS = 1000 * int(os.getenv("WINDOW_SEC", "120"))
@@ -271,7 +277,149 @@ async def on_presence(sid):
 # Assemble ASGI app with Socket.IO mounted
 app = socketio.ASGIApp(sio, other_asgi_app=fastapi_app)
 
+# ------------------- LTI Gateway (minimal scaffolding) --------------------
+lti = APIRouter()
+
+@lti.get('/.well-known/jwks.json')
+async def jwks():
+    return {"keys": [{**DEV_JWK, "kid": LTI_KID or DEV_JWK.get('kid', 'dev-kid')}]} 
+
+@lti.get('/config')
+async def tool_config(request: Request):
+    base = str(request.base_url).rstrip('/')
+    return {
+        "title": "BluNote LTI Tool",
+        "scopes": [
+            "https://purl.imsglobal.org/spec/lti-nrps/scope/contextmembership.readonly",
+            "https://purl.imsglobal.org/spec/lti-ags/scope/score",
+            "https://purl.imsglobal.org/spec/lti-ags/scope/lineitem",
+            "https://purl.imsglobal.org/spec/lti-ags/scope/result.readonly"
+        ],
+        "extensions": [],
+        "public_jwk": DEV_JWK,
+        "oidc_initiation_url": f"{base}/lti/oidc_login",
+        "launch_url": f"{base}/lti/launch",
+        "jwks_url": f"{base}/lti/.well-known/jwks.json",
+    }
+
+@lti.get('/oidc_login')
+async def oidc_login(request: Request):
+    if not (PLATFORM_AUTH_LOGIN_URL and PLATFORM_CLIENT_ID):
+        return JSONResponse(status_code=500, content={"error": "Platform not configured in env. Set PLATFORM_* vars."})
+    qp = request.query_params
+    login_hint = qp.get('login_hint')
+    lti_message_hint = qp.get('lti_message_hint')
+    target_link_uri = qp.get('target_link_uri') or TOOL_REDIRECT_URI
+    state_val = os.urandom(16).hex()
+    nonce_val = os.urandom(16).hex()
+    auth_url = (
+        f"{PLATFORM_AUTH_LOGIN_URL}?" 
+        f"response_type=id_token&response_mode=form_post&prompt=none&scope=openid&"
+        f"client_id={PLATFORM_CLIENT_ID}&redirect_uri={target_link_uri}&state={state_val}&nonce={nonce_val}&"
+        f"login_hint={login_hint or ''}&lti_message_hint={lti_message_hint or ''}"
+    )
+    return JSONResponse(status_code=200, content={"redirect": auth_url, "note": "Redirect your browser to this URL."})
+
+@lti.post('/launch')
+async def lti_launch(id_token: str = Form(...), state: str = Form(None)):
+    claims = None
+    verified = False
+    try:
+        if PLATFORM_JWKS_URL and PLATFORM_ISSUER and PLATFORM_CLIENT_ID:
+            async with httpx.AsyncClient(timeout=10) as client:
+                jwks = (await client.get(PLATFORM_JWKS_URL)).json()
+            claims = jwt.decode(id_token, jwks, algorithms=['RS256'], audience=PLATFORM_CLIENT_ID, issuer=PLATFORM_ISSUER)
+            verified = True
+        else:
+            # DEV: accept token without verification to allow local UI wiring
+            claims = jwt.get_unverified_claims(id_token)
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": "Invalid id_token", "detail": str(e)})
+
+    roles = claims.get('https://purl.imsglobal.org/spec/lti/claim/roles', []) or []
+    context = claims.get('https://purl.imsglobal.org/spec/lti/claim/context', {}) or {}
+    res_link = claims.get('https://purl.imsglobal.org/spec/lti/claim/resource_link', {}) or {}
+    name = claims.get('name') or (claims.get('given_name','') + ' ' + claims.get('family_name','')).strip() or 'User'
+    sub = claims.get('sub') or claims.get('email') or 'user'
+    course_id = context.get('id') or res_link.get('id') or 'COURSE1'
+    is_instructor = any('Instructor' in r or 'Teacher' in r for r in roles)
+
+    # Dev redirect to frontend
+    if is_instructor:
+        url = f"{FRONTEND_BASE}/instructor?courseId={course_id}&name={name}"
+    else:
+        url = f"{FRONTEND_BASE}/student?courseId={course_id}&userId={sub}&name={name}"
+
+    return JSONResponse(content={
+        "ok": True,
+        "verified": verified,
+        "redirect": url,
+        "courseId": course_id,
+        "role": "instructor" if is_instructor else "student",
+    })
+
+@lti.get('/dev/launch')
+async def dev_launch(role: str = 'student', courseId: str = 'COURSE1', userId: str = 'dev1', name: str = 'Dev User'):
+    if role.lower().startswith('inst'):
+        url = f"{FRONTEND_BASE}/instructor?courseId={courseId}&name={name}"
+    else:
+        url = f"{FRONTEND_BASE}/student?courseId={courseId}&userId={userId}&name={name}"
+    return {"redirect": url}
+
+fastapi_app.include_router(lti, prefix='/lti')
+
 
 if __name__ == '__main__':
     import uvicorn
     uvicorn.run("app.main:app", host="0.0.0.0", port=PORT, reload=True)
+# LTI platform/tool config
+PLATFORM_ISSUER = os.getenv("PLATFORM_ISSUER")
+PLATFORM_CLIENT_ID = os.getenv("PLATFORM_CLIENT_ID")
+PLATFORM_AUTH_LOGIN_URL = os.getenv("PLATFORM_AUTH_LOGIN_URL")
+PLATFORM_JWKS_URL = os.getenv("PLATFORM_JWKS_URL")
+PLATFORM_DEPLOYMENT_ID = os.getenv("PLATFORM_DEPLOYMENT_ID")
+TOOL_REDIRECT_URI = os.getenv("TOOL_REDIRECT_URI", f"http://localhost:{PORT}/lti/launch")
+
+# Tool key pair (dev: generate ephemeral if env empty)
+LTI_PRIVATE_KEY_PEM = os.getenv("LTI_PRIVATE_KEY_PEM")
+LTI_KID = os.getenv("LTI_KID")
+
+def _generate_rsa_key():
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode('utf-8')
+    pub = key.public_key()
+    pub_numbers = pub.public_numbers()
+    e = pub_numbers.e.to_bytes((pub_numbers.e.bit_length() + 7) // 8, 'big')
+    n = pub_numbers.n.to_bytes((pub_numbers.n.bit_length() + 7) // 8, 'big')
+    jwk = {
+        "kty": "RSA",
+        "use": "sig",
+        "alg": "RS256",
+        "kid": "dev-kid",
+        "n": base64url_encode(n).decode('utf-8'),
+        "e": base64url_encode(e).decode('utf-8'),
+    }
+    return pem, jwk
+
+if not LTI_PRIVATE_KEY_PEM:
+    LTI_PRIVATE_KEY_PEM, DEV_JWK = _generate_rsa_key()
+    LTI_KID = LTI_KID or DEV_JWK["kid"]
+else:
+    # derive public JWK from provided private key
+    _key = serialization.load_pem_private_key(LTI_PRIVATE_KEY_PEM.encode('utf-8'), password=None)
+    pub = _key.public_key()
+    pub_numbers = pub.public_numbers()
+    e = pub_numbers.e.to_bytes((pub_numbers.e.bit_length() + 7) // 8, 'big')
+    n = pub_numbers.n.to_bytes((pub_numbers.n.bit_length() + 7) // 8, 'big')
+    DEV_JWK = {
+        "kty": "RSA",
+        "use": "sig",
+        "alg": "RS256",
+        "kid": LTI_KID or "tool-kid",
+        "n": base64url_encode(n).decode('utf-8'),
+        "e": base64url_encode(e).decode('utf-8'),
+    }
