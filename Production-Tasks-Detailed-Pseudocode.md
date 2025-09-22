@@ -2,7 +2,7 @@
 
 Based on the BluNote LTI architecture and SPEC-1 requirements, this document provides expanded pseudocode for each production task.
 
-## 1. Harden Authentication & Transport - DETAILED
+## ~~1. Harden Authentication & Transport - DETAILED~~ ✅ COMPLETED
 
 ```pseudo
 function secure_services():
@@ -487,7 +487,7 @@ function secure_services():
     logger.info("Security hardening complete")
 ```
 
-## 2. Complete LTI Flows (OIDC + Deep Linking) - DETAILED
+## ~~2. Complete LTI Flows (OIDC + Deep Linking) - DETAILED~~ ✅ COMPLETED
 
 ```pseudo
 function complete_lti_flows():
