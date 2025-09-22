@@ -10,11 +10,12 @@ router = APIRouter()
 
 
 @router.get('/course/{course_id}/metrics')
-async def get_metrics(
-    course_id: str,
-    claims: Dict[str, Any] = Depends(require_course_access(course_id))
-):
+async def get_metrics(course_id: str, claims: Dict[str, Any] = Depends(verify_token)):
     """Get confusion metrics for a course"""
+    # Verify user has access to this course
+    if claims.get("course_id") != course_id:
+        raise HTTPException(403, "Access denied to this course")
+
     # Import here to avoid circular imports
     from ..main import compute_metrics
 
@@ -27,11 +28,12 @@ async def get_metrics(
 
 
 @router.get('/course/{course_id}/roster')
-async def get_roster(
-    course_id: str,
-    claims: Dict[str, Any] = Depends(require_course_access(course_id))
-):
+async def get_roster(course_id: str, claims: Dict[str, Any] = Depends(verify_token)):
     """Get course roster count"""
+    # Verify user has access to this course
+    if claims.get("course_id") != course_id:
+        raise HTTPException(403, "Access denied to this course")
+
     # Import here to avoid circular imports
     from ..main import get_course
 
@@ -43,12 +45,12 @@ async def get_roster(
 
 
 @router.post('/course/{course_id}/roster')
-async def post_roster(
-    course_id: str,
-    payload: Dict[str, Any],
-    claims: Dict[str, Any] = Depends(require_course_access(course_id))
-):
+async def post_roster(course_id: str, payload: Dict[str, Any], claims: Dict[str, Any] = Depends(verify_token)):
     """Update course roster count (instructor only)"""
+    # Verify user has access to this course
+    if claims.get("course_id") != course_id:
+        raise HTTPException(403, "Access denied to this course")
+
     if not claims.get("is_instructor", False):
         raise HTTPException(403, "Instructor role required")
 
