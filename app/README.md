@@ -3,31 +3,43 @@
 This is a minimal implementation of the BluNote web app per SPEC-1 — focusing on the realtime confusion button, instructor dashboard, threshold logic, and a tutoring stub. By request, the backend is provided in Python (FastAPI + Socket.IO). An initial LTI 1.3 gateway (OIDC + Launch scaffold, JWKS, config, and a dev launch route) is included for wiring and testing.
 
 ## Stack
-- Backend: Node.js (Express + Socket.IO)
+- Backend: Python (FastAPI + Socket.IO)
 - Frontend: React (Vite)
 - State: In-memory (dev). Replace with Redis/Postgres for prod.
 
 ## Run locally
-Prerequisites: Node 18+ and npm; Python 3.10+
+Prerequisites: Python 3.10+; Node 18+ and npm (frontend tooling)
 
-1. Start the backend (Python)
+All paths below are relative to the repo root (`BluNote LTI/`).
+
+1. Backend setup (first run)
 ```
-cd "BluNote LTI/app/server-py"
+# from repo root
+cd app/server-py
 cp .env.example .env
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 4000 --reload
+deactivate
+cd ../..
 ```
 
-2. Start the frontend (React)
+2. Frontend setup (first run)
 ```
-cd "BluNote LTI/app/web"
+# from repo root
+cd app/web
 npm install
-npm run dev
+cd ../..
 ```
 
-3. Open the app:
+3. Start both services
+```
+# from repo root
+cd app
+./dev.sh
+```
+
+4. Open the app:
 - http://localhost:5173
 - Use the quick links on the home page to open two students and one instructor for the same course (e.g., COURSE1).
 

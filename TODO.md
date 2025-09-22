@@ -30,8 +30,7 @@ I will keep this list updated and cross out items as they’re completed. Items 
 - [ ] Admin panel for multi‑institution settings and privacy controls.
 
 ## How to Validate Current Build
-- Backend: `cd "BluNote LTI/app/server-py" && source .venv/bin/activate && uvicorn app.main:app --host 0.0.0.0 --port 4000 --reload`
-- Frontend: `cd "BluNote LTI/app/web" && npm run dev` → open `http://localhost:5173`
+- Start dev servers: `cd app && ./dev.sh` → open `http://localhost:5173`
 - Open two students + one instructor for the same `courseId`. Instructor dashboard should show “Roster (auto)”. Reduce roster to test thresholds quickly.
 - Dev LTI launch (no Moodle):
   - Instructor: `http://localhost:4000/lti/dev/launch?role=instructor&courseId=COURSE1&name=Prof`
@@ -40,10 +39,9 @@ I will keep this list updated and cross out items as they’re completed. Items 
 ---
 
 ## Your Next Actions
-1) Run both services and open 2 students + 1 instructor to verify “Roster (auto)” reflects active connections.
+1) Run both services via `cd app && ./dev.sh` and open 2 students + 1 instructor to verify “Roster (auto)” reflects active connections.
 2) Trigger an alert by setting roster small (e.g., 4) and pressing “I’m Confused” from one student.
 3) Confirm tutoring stub appears for the confused student.
 4) If you want to test a dev “launch”, visit `/lti/dev/launch` URLs above.
 
 When you’re ready, I’ll implement token‑secured WS + Deep Linking next.
-
