@@ -1,1050 +1,380 @@
-# Production Tasks Detailed Pseudocode
+# Production Tasks Pseudocode
 
-Based on the BluNote LTI architecture and SPEC-1 requirements, this document provides expanded pseudocode for each production task.
-
-## ~~1. Harden Authentication & Transport - DETAILED~~ ✅ COMPLETED
-
+## 1. Harden Authentication & Transport
 ```pseudo
 function secure_services():
-    # ===== ENVIRONMENT & KEY MANAGEMENT =====
-    load_production_env():
-        # Load from secure vault (AWS Secrets Manager/HashiCorp Vault)
-        LTI_PRIVATE_KEY_PEM = vault.get("bluenote/lti/private_key")
-        LTI_KID = vault.get("bluenote/lti/kid")
-        JWT_SIGNING_SECRET = vault.get("bluenote/jwt/secret")
-        REDIS_URL = vault.get("bluenote/redis/url")
-        POSTGRES_URL = vault.get("bluenote/postgres/url")
+    load_env_keys()
+    init_jwt_signer(private_key)
+    define issue_launch_token(claims):
+        token = jwt_sign(claims, expires_in=5_minutes)
+        store_token_in_cache(token.id, claims)
+        return token
 
-        # Platform specific configs
-        PLATFORM_ISSUER = env.get("PLATFORM_ISSUER")  # e.g., "https://moodle.edu"
-        PLATFORM_CLIENT_ID = env.get("PLATFORM_CLIENT_ID")
-        PLATFORM_JWKS_URL = env.get("PLATFORM_JWKS_URL")
-
-        # Security configs
-        ALLOWED_ORIGINS = env.get("ALLOWED_ORIGINS").split(",")  # ["https://moodle.edu"]
-        SESSION_TIMEOUT = 300  # 5 minutes
-        MAX_REQUESTS_PER_MIN = 60
-        MAX_CONFUSION_PER_USER = 3  # per minute
-
-    # ===== JWT TOKEN INFRASTRUCTURE =====
-    init_jwt_system():
-        # Create JWT signer with RS256 for LTI
-        lti_signer = jwt.Signer(
-            algorithm="RS256",
-            private_key=LTI_PRIVATE_KEY_PEM,
-            kid=LTI_KID
-        )
-
-        # Create internal JWT signer with HS256 for session tokens
-        session_signer = jwt.Signer(
-            algorithm="HS256",
-            secret=JWT_SIGNING_SECRET
-        )
-
-        # Initialize token cache (Redis with TTL)
-        token_cache = RedisCache(
-            prefix="tokens:",
-            default_ttl=SESSION_TIMEOUT
-        )
-
-        return lti_signer, session_signer, token_cache
-
-    # ===== LAUNCH TOKEN ISSUANCE =====
-    define issue_launch_token(claims, session_signer, token_cache):
-        # Generate unique token ID
-        token_id = uuid4()
-
-        # Build session claims from LTI launch
-        session_claims = {
-            "jti": token_id,
-            "sub": claims["sub"],  # User ID from LTI
-            "iss": "bluenote",
-            "aud": "bluenote-frontend",
-            "exp": time.now() + SESSION_TIMEOUT,
-            "iat": time.now(),
-            "nbf": time.now(),
-
-            # BluNote specific claims
-            "course_id": claims["https://purl.imsglobal.org/spec/lti/claim/context"]["id"],
-            "course_title": claims["https://purl.imsglobal.org/spec/lti/claim/context"]["title"],
-            "user_id": claims["sub"],
-            "user_name": claims.get("name", "Anonymous"),
-            "user_email": claims.get("email"),
-            "roles": claims["https://purl.imsglobal.org/spec/lti/claim/roles"],
-            "is_instructor": is_instructor_role(claims["roles"]),
-            "is_student": is_student_role(claims["roles"]),
-
-            # Platform tracking
-            "platform_issuer": claims["iss"],
-            "deployment_id": claims["https://purl.imsglobal.org/spec/lti/claim/deployment_id"],
-
-            # Service URLs if available
-            "nrps_url": claims.get("https://purl.imsglobal.org/spec/lti-nrps/claim/namesroleservice", {}).get("context_memberships_url"),
-            "ags_url": claims.get("https://purl.imsglobal.org/spec/lti-ags/claim/endpoint", {}).get("lineitem"),
-        }
-
-        # Sign the token
-        token = session_signer.sign(session_claims)
-
-        # Cache the token with claims for quick lookup
-        token_cache.set(
-            key=f"session:{token_id}",
-            value=json.dumps(session_claims),
-            ttl=SESSION_TIMEOUT
-        )
-
-        # Also cache by user-course for presence tracking
-        token_cache.set(
-            key=f"user-course:{claims['sub']}:{session_claims['course_id']}",
-            value=token_id,
-            ttl=SESSION_TIMEOUT
-        )
-
-        return {
-            "token": token,
-            "token_id": token_id,
-            "expires_in": SESSION_TIMEOUT
-        }
-
-    # ===== LTI LAUNCH HANDLER UPDATE =====
     update_lti_launch_handler():
-        @app.post("/lti/launch")
-        async def lti_launch(request: Request):
-            try:
-                # Extract and verify the ID token from Moodle
-                id_token = request.form.get("id_token")
-                state = request.form.get("state")
+        claims = verify_incoming_id_token()
+        token = issue_launch_token({
+            "course_id": claims.course_id,
+            "user_id": claims.user_id,
+            "roles": claims.roles
+        })
+        redirect_to_frontend(with_query_token=token.value)
 
-                # Verify state matches what we sent during OIDC
-                if not verify_state_nonce(state):
-                    raise HTTPException(401, "Invalid state")
+    configure_fastapi_middlewares():
+        add_https_redirect()
+        add_rate_limiter(global_limit, per_user_limit)
+        add_request_logger()
 
-                # Fetch platform's public keys
-                platform_keys = await fetch_platform_jwks(PLATFORM_JWKS_URL)
-
-                # Verify the JWT signature and claims
-                claims = jwt.decode(
-                    id_token,
-                    keys=platform_keys,
-                    audience=PLATFORM_CLIENT_ID,
-                    issuer=PLATFORM_ISSUER
-                )
-
-                # Validate required LTI claims
-                validate_lti_claims(claims)
-
-                # Issue our session token
-                session_data = issue_launch_token(claims, session_signer, token_cache)
-
-                # Log the launch for auditing
-                await log_launch_event(
-                    user_id=claims["sub"],
-                    course_id=session_data["course_id"],
-                    platform=PLATFORM_ISSUER,
-                    timestamp=datetime.utcnow()
-                )
-
-                # Redirect to frontend with token
-                frontend_url = f"{FRONTEND_BASE}/?token={session_data['token']}"
-
-                # Add role-specific routing
-                if session_data["is_instructor"]:
-                    frontend_url += "&view=dashboard"
-                else:
-                    frontend_url += "&view=student"
-
-                return RedirectResponse(url=frontend_url, status_code=302)
-
-            except jwt.InvalidTokenError as e:
-                logger.error(f"JWT validation failed: {e}")
-                raise HTTPException(401, "Invalid token")
-            except Exception as e:
-                logger.error(f"Launch failed: {e}")
-                raise HTTPException(500, "Launch failed")
-
-    # ===== FASTAPI MIDDLEWARE CONFIGURATION =====
-    configure_fastapi_middlewares(app):
-        # HTTPS Redirect Middleware
-        @app.middleware("http")
-        async def https_redirect(request: Request, call_next):
-            if not request.url.scheme == "https":
-                if env.get("ENFORCE_HTTPS", "true") == "true":
-                    url = request.url.replace(scheme="https")
-                    return RedirectResponse(url=str(url), status_code=301)
-            response = await call_next(request)
-            return response
-
-        # Rate Limiting Middleware
-        from slowapi import Limiter, _rate_limit_exceeded_handler
-        from slowapi.util import get_remote_address
-
-        limiter = Limiter(
-            key_func=get_remote_address,
-            default_limits=[f"{MAX_REQUESTS_PER_MIN}/minute"],
-            storage_uri=REDIS_URL
-        )
-        app.state.limiter = limiter
-        app.add_exception_handler(429, _rate_limit_exceeded_handler)
-
-        # Per-endpoint rate limits
-        confusion_limiter = limiter.limit(f"{MAX_CONFUSION_PER_USER}/minute")
-
-        # Request Logging Middleware
-        @app.middleware("http")
-        async def log_requests(request: Request, call_next):
-            request_id = str(uuid4())
-            start_time = time.time()
-
-            # Add request ID to context
-            request.state.request_id = request_id
-
-            # Log request
-            logger.info({
-                "request_id": request_id,
-                "method": request.method,
-                "url": str(request.url),
-                "client": request.client.host,
-                "user_agent": request.headers.get("user-agent")
-            })
-
-            response = await call_next(request)
-
-            # Log response
-            duration = time.time() - start_time
-            logger.info({
-                "request_id": request_id,
-                "status": response.status_code,
-                "duration_ms": duration * 1000
-            })
-
-            # Add request ID to response headers
-            response.headers["X-Request-ID"] = request_id
-
-            return response
-
-        # Security Headers Middleware
-        @app.middleware("http")
-        async def add_security_headers(request: Request, call_next):
-            response = await call_next(request)
-
-            # Content Security Policy for iframe embedding
-            csp = "default-src 'self'; "
-            csp += f"frame-ancestors {' '.join(ALLOWED_ORIGINS)}; "
-            csp += "script-src 'self' 'unsafe-inline'; "  # Adjust as needed
-            csp += "style-src 'self' 'unsafe-inline'; "
-            csp += "img-src 'self' data: https:; "
-            csp += "connect-src 'self' wss: https:;"
-
-            response.headers["Content-Security-Policy"] = csp
-            response.headers["X-Content-Type-Options"] = "nosniff"
-            response.headers["X-Frame-Options"] = "SAMEORIGIN"
-            response.headers["X-XSS-Protection"] = "1; mode=block"
-            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-            response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-
-            return response
-
-    # ===== REST API AUTHENTICATION GUARD =====
     apply_rest_guard():
-        from fastapi import Depends, HTTPException, Security
-        from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+        def auth_dependency(request):
+            token = extract_bearer_token(request)
+            claims = verify_and_cache_lookup(token)
+            enforce_course_scope(request, claims)
+            return claims
 
-        security = HTTPBearer()
-
-        async def verify_token(
-            credentials: HTTPAuthorizationCredentials = Security(security)
-        ):
-            token = credentials.credentials
-
-            try:
-                # Decode the JWT
-                claims = session_signer.verify(token)
-
-                # Check if token is in cache (not revoked)
-                token_id = claims["jti"]
-                cached = await token_cache.get(f"session:{token_id}")
-
-                if not cached:
-                    raise HTTPException(401, "Token expired or revoked")
-
-                # Refresh TTL on activity
-                await token_cache.expire(f"session:{token_id}", SESSION_TIMEOUT)
-
-                return claims
-
-            except jwt.ExpiredSignatureError:
-                raise HTTPException(401, "Token expired")
-            except jwt.InvalidTokenError:
-                raise HTTPException(401, "Invalid token")
-
-        # Apply to all API routes
-        @app.get("/api/metrics/{course_id}")
-        async def get_metrics(
-            course_id: str,
-            claims: dict = Depends(verify_token)
-        ):
-            # Verify user has access to this course
-            if claims["course_id"] != course_id:
-                raise HTTPException(403, "Access denied to this course")
-
-            # Proceed with endpoint logic
-            metrics = await calculate_metrics(course_id)
-            return metrics
-
-        @app.post("/api/confused")
-        @confusion_limiter
-        async def report_confused(
-            request: ConfusedRequest,
-            claims: dict = Depends(verify_token)
-        ):
-            # Ensure student can only report for themselves
-            if not claims["is_student"]:
-                raise HTTPException(403, "Only students can report confusion")
-
-            if request.user_id != claims["user_id"]:
-                raise HTTPException(403, "Cannot report for another user")
-
-            # Process confusion event
-            await process_confusion(
-                course_id=claims["course_id"],
-                user_id=claims["user_id"],
-                timestamp=datetime.utcnow()
-            )
-
-            return {"status": "recorded"}
-
-    # ===== WEBSOCKET AUTHENTICATION GUARD =====
     apply_socket_guard():
-        from socketio import AsyncServer, AsyncNamespace
+        on_socket_connect(payload):
+            token = payload.token
+            claims = verify_and_cache_lookup(token)
+            if claims.invalid: reject_connection()
+            attach_claims_to_session(claims)
 
-        sio = AsyncServer(
-            cors_allowed_origins=ALLOWED_ORIGINS,
-            async_mode="asgi"
-        )
-
-        class SecureNamespace(AsyncNamespace):
-            async def on_connect(self, sid, environ, auth):
-                try:
-                    # Extract token from auth payload
-                    if not auth or "token" not in auth:
-                        await self.disconnect(sid)
-                        return False
-
-                    token = auth["token"]
-
-                    # Verify the token
-                    claims = session_signer.verify(token)
-
-                    # Check cache
-                    token_id = claims["jti"]
-                    cached = await token_cache.get(f"session:{token_id}")
-
-                    if not cached:
-                        await self.disconnect(sid)
-                        return False
-
-                    # Store claims in session
-                    await self.save_session(sid, {
-                        "claims": claims,
-                        "course_id": claims["course_id"],
-                        "user_id": claims["user_id"],
-                        "is_instructor": claims["is_instructor"],
-                        "connected_at": datetime.utcnow().isoformat()
-                    })
-
-                    # Join course room
-                    await self.enter_room(sid, f"course:{claims['course_id']}")
-
-                    # Join role-specific room
-                    if claims["is_instructor"]:
-                        await self.enter_room(sid, f"instructors:{claims['course_id']}")
-                    else:
-                        await self.enter_room(sid, f"students:{claims['course_id']}")
-
-                    # Track presence
-                    await track_user_presence(
-                        course_id=claims["course_id"],
-                        user_id=claims["user_id"],
-                        action="connect"
-                    )
-
-                    logger.info(f"WebSocket connected: {claims['user_id']} in course {claims['course_id']}")
-                    return True
-
-                except Exception as e:
-                    logger.error(f"WebSocket auth failed: {e}")
-                    await self.disconnect(sid)
-                    return False
-
-            async def on_disconnect(self, sid):
-                session = await self.get_session(sid)
-                if session:
-                    await track_user_presence(
-                        course_id=session["course_id"],
-                        user_id=session["user_id"],
-                        action="disconnect"
-                    )
-                    logger.info(f"WebSocket disconnected: {session['user_id']}")
-
-            async def on_confused(self, sid, data):
-                session = await self.get_session(sid)
-                if not session or not session["claims"]["is_student"]:
-                    return {"error": "Unauthorized"}
-
-                # Apply rate limiting check
-                if await check_rate_limit(session["user_id"], "confused"):
-                    return {"error": "Rate limit exceeded"}
-
-                # Process confusion
-                await process_confusion(
-                    course_id=session["course_id"],
-                    user_id=session["user_id"],
-                    timestamp=datetime.utcnow()
-                )
-
-                return {"status": "recorded"}
-
-        # Register namespace
-        sio.register_namespace(SecureNamespace("/"))
-
-    # ===== CORS CONFIGURATION =====
-    set_cors_policy(app):
-        from fastapi.middleware.cors import CORSMiddleware
-
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=ALLOWED_ORIGINS,
-            allow_credentials=True,
-            allow_methods=["GET", "POST", "OPTIONS"],
-            allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
-            expose_headers=["X-Request-ID"],
-            max_age=3600
-        )
-
-    # ===== FRONTEND TOKEN HANDLING =====
-    update_frontend_to_send_token():
-        """
-        Frontend implementation for token handling:
-
-        // Extract token from URL on launch
-        const urlParams = new URLSearchParams(window.location.search);
-        const token = urlParams.get('token');
-
-        if (token) {
-            // Store securely
-            sessionStorage.setItem('bluenote_token', token);
-
-            // Clean URL
-            window.history.replaceState({}, document.title, window.location.pathname);
-        }
-
-        // Configure HTTP client
-        const api = axios.create({
-            baseURL: API_BASE,
-            headers: {
-                'Authorization': `Bearer ${sessionStorage.getItem('bluenote_token')}`
-            }
-        });
-
-        // Configure WebSocket with auth
-        const socket = io(API_BASE, {
-            auth: {
-                token: sessionStorage.getItem('bluenote_token')
-            },
-            transports: ['websocket'],
-            reconnection: true,
-            reconnectionAttempts: 5
-        });
-
-        // Handle token expiry
-        api.interceptors.response.use(
-            response => response,
-            error => {
-                if (error.response?.status === 401) {
-                    // Token expired - show re-launch message
-                    alert('Session expired. Please relaunch from your LMS.');
-                    sessionStorage.removeItem('bluenote_token');
-                }
-                return Promise.reject(error);
-            }
-        );
-        """
-
-    # ===== EXECUTION =====
-    # Initialize all components
-    load_production_env()
-    lti_signer, session_signer, token_cache = init_jwt_system()
-
-    # Apply all middleware and guards
-    configure_fastapi_middlewares(app)
-    apply_rest_guard()
-    apply_socket_guard()
-    set_cors_policy(app)
-
-    # Update frontend instructions
-    update_frontend_to_send_token()
-
-    logger.info("Security hardening complete")
+    set_cors_policy(allowed_origins, allow_credentials=True)
+    update_frontend_to_send_token_on_ws_and_http()
 ```
 
-## ~~2. Complete LTI Flows (OIDC + Deep Linking) - DETAILED~~ ✅ COMPLETED
-
+## 2. Complete LTI Flows (OIDC + Deep Linking)
 ```pseudo
 function complete_lti_flows():
-    # ===== TOOL REGISTRATION CONFIGURATION =====
-    configure_tool_registration():
-        # Load from environment or database
-        tool_config = {
-            "issuer": "https://bluenote.edu",
-            "client_id": PLATFORM_CLIENT_ID,
-            "deployment_id": PLATFORM_DEPLOYMENT_ID,
-            "oidc_login_url": f"{TOOL_BASE}/lti/oidc_login",
-            "launch_url": f"{TOOL_BASE}/lti/launch",
-            "redirect_uri": f"{TOOL_BASE}/lti/launch",
-            "jwks_url": f"{TOOL_BASE}/lti/.well-known/jwks.json",
-            "deep_linking_url": f"{TOOL_BASE}/lti/deep_linking",
+    configure_tool_registration_from_env()
 
-            # Tool capabilities
-            "scopes": [
-                "https://purl.imsglobal.org/spec/lti-nrps/scope/contextmembership.readonly",
-                "https://purl.imsglobal.org/spec/lti-ags/scope/lineitem",
-                "https://purl.imsglobal.org/spec/lti-ags/scope/score"
-            ],
-
-            # Custom parameters
-            "custom_parameters": {
-                "confusion_threshold": "$Custom.confusion_threshold",
-                "cooldown_minutes": "$Custom.cooldown_minutes"
-            }
-        }
-
-        # Store in database for multi-tenant support
-        await db.upsert_tool_registration(
-            platform_url=PLATFORM_ISSUER,
-            config=tool_config
-        )
-
-        return tool_config
-
-    # ===== OIDC LOGIN IMPLEMENTATION =====
     implement_oidc_login():
-        @app.get("/lti/oidc_login")
-        @app.post("/lti/oidc_login")
-        async def oidc_login(request: Request):
-            """
-            Handle OIDC login initiation from Moodle
-            """
-            # Extract parameters
-            iss = request.values.get("iss")  # Platform issuer
-            login_hint = request.values.get("login_hint")  # User identifier
-            target_link_uri = request.values.get("target_link_uri")  # Where to return
-            lti_message_hint = request.values.get("lti_message_hint")  # Optional platform data
-            client_id = request.values.get("client_id")  # Optional client ID
-            deployment_id = request.values.get("lti_deployment_id")  # Deployment ID
+        read_platform_metadata()
+        compute_state_nonce()
+        redirect_user_to_platform_authorize()
 
-            # Validate platform
-            if iss != PLATFORM_ISSUER:
-                logger.error(f"Unknown platform issuer: {iss}")
-                raise HTTPException(400, "Unknown platform")
-
-            # Generate state and nonce
-            state = secrets.token_urlsafe(32)
-            nonce = secrets.token_urlsafe(32)
-
-            # Store state for validation (with 10 min TTL)
-            await token_cache.set(
-                f"oidc_state:{state}",
-                json.dumps({
-                    "nonce": nonce,
-                    "login_hint": login_hint,
-                    "created_at": datetime.utcnow().isoformat()
-                }),
-                ttl=600
-            )
-
-            # Build authorization redirect URL
-            auth_params = {
-                "response_type": "id_token",
-                "response_mode": "form_post",
-                "scope": "openid",
-                "client_id": client_id or PLATFORM_CLIENT_ID,
-                "redirect_uri": tool_config["redirect_uri"],
-                "login_hint": login_hint,
-                "state": state,
-                "nonce": nonce,
-                "prompt": "none"
-            }
-
-            # Add optional parameters
-            if lti_message_hint:
-                auth_params["lti_message_hint"] = lti_message_hint
-            if deployment_id:
-                auth_params["lti_deployment_id"] = deployment_id
-
-            # Get platform's authorization endpoint
-            platform_config = await fetch_platform_config(iss)
-            auth_url = platform_config["authorization_endpoint"]
-
-            # Redirect to platform for authentication
-            redirect_url = f"{auth_url}?{urlencode(auth_params)}"
-
-            logger.info(f"OIDC login initiated for {login_hint} from {iss}")
-
-            return RedirectResponse(url=redirect_url, status_code=302)
-
-    # ===== LAUNCH HANDLER WITH FULL VALIDATION =====
     implement_launch_handler():
-        @app.post("/lti/launch")
-        async def lti_launch(request: Request):
-            """
-            Handle LTI 1.3 ResourceLinkRequest launch
-            """
-            # Extract form data
-            id_token = request.form.get("id_token")
-            state = request.form.get("state")
+        fetch_platform_jwks()
+        verify_id_token_signature()
+        validate_message_type_and_version()
+        persist_launch_context(course_id, user_id, roles)
+        issue_launch_token()
+        respond_with_frontend_redirect()
 
-            if not id_token or not state:
-                raise HTTPException(400, "Missing required parameters")
-
-            # Validate state
-            state_data = await token_cache.get(f"oidc_state:{state}")
-            if not state_data:
-                raise HTTPException(401, "Invalid or expired state")
-
-            state_info = json.loads(state_data)
-            await token_cache.delete(f"oidc_state:{state}")
-
-            # Fetch platform's public keys
-            platform_keys = await fetch_and_cache_jwks(PLATFORM_JWKS_URL)
-
-            # Decode and verify JWT
-            try:
-                # Find the right key
-                header = jwt.get_unverified_header(id_token)
-                key = find_platform_key(platform_keys, header.get("kid"))
-
-                # Verify signature and decode
-                claims = jwt.decode(
-                    id_token,
-                    key=key,
-                    algorithms=["RS256"],
-                    options={
-                        "verify_signature": True,
-                        "verify_aud": True,
-                        "verify_iss": True,
-                        "verify_exp": True,
-                        "verify_nbf": True,
-                        "verify_iat": True
-                    },
-                    audience=PLATFORM_CLIENT_ID,
-                    issuer=PLATFORM_ISSUER
-                )
-
-            except jwt.InvalidTokenError as e:
-                logger.error(f"JWT validation failed: {e}")
-                raise HTTPException(401, f"Invalid token: {str(e)}")
-
-            # Validate nonce
-            if claims.get("nonce") != state_info["nonce"]:
-                raise HTTPException(401, "Invalid nonce")
-
-            # Validate LTI version
-            lti_version = claims.get("https://purl.imsglobal.org/spec/lti/claim/version")
-            if lti_version != "1.3.0":
-                raise HTTPException(400, f"Unsupported LTI version: {lti_version}")
-
-            # Validate message type
-            message_type = claims.get("https://purl.imsglobal.org/spec/lti/claim/message_type")
-            if message_type not in ["LtiResourceLinkRequest", "LtiDeepLinkingRequest"]:
-                raise HTTPException(400, f"Unsupported message type: {message_type}")
-
-            # Extract user information
-            user_info = {
-                "id": claims["sub"],
-                "name": claims.get("name", ""),
-                "given_name": claims.get("given_name", ""),
-                "family_name": claims.get("family_name", ""),
-                "email": claims.get("email", ""),
-                "roles": claims.get("https://purl.imsglobal.org/spec/lti/claim/roles", [])
-            }
-
-            # Extract course context
-            context = claims.get("https://purl.imsglobal.org/spec/lti/claim/context", {})
-            course_info = {
-                "id": context.get("id"),
-                "title": context.get("title", ""),
-                "label": context.get("label", "")
-            }
-
-            # Extract resource link
-            resource_link = claims.get("https://purl.imsglobal.org/spec/lti/claim/resource_link", {})
-
-            # Extract platform info
-            platform_info = claims.get("https://purl.imsglobal.org/spec/lti/claim/tool_platform", {})
-
-            # Extract service URLs
-            services = {
-                "nrps": claims.get("https://purl.imsglobal.org/spec/lti-nrps/claim/namesroleservice", {}),
-                "ags": claims.get("https://purl.imsglobal.org/spec/lti-ags/claim/endpoint", {})
-            }
-
-            # Store launch data in database
-            launch_id = str(uuid4())
-            await db.store_launch(
-                launch_id=launch_id,
-                platform_issuer=claims["iss"],
-                deployment_id=claims.get("https://purl.imsglobal.org/spec/lti/claim/deployment_id"),
-                user_info=user_info,
-                course_info=course_info,
-                resource_link=resource_link,
-                services=services,
-                raw_claims=claims,
-                timestamp=datetime.utcnow()
-            )
-
-            # Create or update user
-            user = await db.upsert_user(
-                platform_user_id=user_info["id"],
-                email=user_info["email"],
-                name=user_info["name"],
-                platform_issuer=claims["iss"]
-            )
-
-            # Create or update course enrollment
-            enrollment = await db.upsert_enrollment(
-                user_id=user.id,
-                course_id=course_info["id"],
-                roles=user_info["roles"],
-                course_title=course_info["title"]
-            )
-
-            # Handle different message types
-            if message_type == "LtiResourceLinkRequest":
-                # Standard launch - create session and redirect
-                session_data = issue_launch_token(claims, session_signer, token_cache)
-
-                # Determine view based on role
-                is_instructor = any(
-                    role in str(user_info["roles"])
-                    for role in ["Instructor", "Teacher", "Faculty", "Administrator"]
-                )
-
-                view = "dashboard" if is_instructor else "student"
-
-                # Build frontend URL
-                frontend_url = f"{FRONTEND_BASE}/?token={session_data['token']}&view={view}&course={course_info['id']}"
-
-                # Log successful launch
-                await log_launch_event(
-                    launch_id=launch_id,
-                    user_id=user.id,
-                    course_id=course_info["id"],
-                    role=view,
-                    timestamp=datetime.utcnow()
-                )
-
-                return RedirectResponse(url=frontend_url, status_code=302)
-
-            elif message_type == "LtiDeepLinkingRequest":
-                # Deep linking request - show resource selection
-                return await handle_deep_linking_request(claims, launch_id)
-
-    # ===== DEEP LINKING ENDPOINT =====
     implement_deep_linking_endpoint():
-        @app.get("/lti/deep_linking/{launch_id}")
-        async def deep_linking_selection(launch_id: str):
-            """
-            Show resource selection UI for deep linking
-            """
-            # Retrieve launch data
-            launch = await db.get_launch(launch_id)
-            if not launch:
-                raise HTTPException(404, "Launch not found")
+        if request.method == GET:
+            render_resource_selection_ui()
+        if request.method == POST:
+            validate_deep_linking_jwt()
+            build_content_item_manifest()
+            return_deep_linking_response_to_platform()
 
-            # Generate selection page HTML
-            html = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>BluNote - Select Activity</title>
-                <style>
-                    body {{ font-family: Arial, sans-serif; padding: 20px; }}
-                    .activity {{ border: 1px solid #ddd; padding: 15px; margin: 10px 0; cursor: pointer; }}
-                    .activity:hover {{ background: #f0f0f0; }}
-                </style>
-            </head>
-            <body>
-                <h1>Select BluNote Activity</h1>
-                <div class="activity" onclick="selectActivity('confusion_tracker')">
-                    <h3>Confusion Tracker</h3>
-                    <p>Real-time confusion monitoring with AI tutoring support</p>
-                </div>
-                <div class="activity" onclick="selectActivity('analytics_dashboard')">
-                    <h3>Analytics Dashboard</h3>
-                    <p>Historical confusion patterns and engagement metrics</p>
-                </div>
-
-                <script>
-                    function selectActivity(type) {{
-                        fetch('/lti/deep_linking/{launch_id}/select', {{
-                            method: 'POST',
-                            headers: {{ 'Content-Type': 'application/json' }},
-                            body: JSON.stringify({{ activity_type: type }})
-                        }}).then(response => response.text())
-                          .then(html => document.write(html));
-                    }}
-                </script>
-            </body>
-            </html>
-            """
-
-            return HTMLResponse(content=html)
-
-        @app.post("/lti/deep_linking/{launch_id}/select")
-        async def deep_linking_select(launch_id: str, selection: dict):
-            """
-            Handle resource selection and return to platform
-            """
-            # Retrieve launch data
-            launch = await db.get_launch(launch_id)
-            if not launch:
-                raise HTTPException(404, "Launch not found")
-
-            claims = launch["raw_claims"]
-
-            # Get deep linking settings
-            dl_settings = claims.get("https://purl.imsglobal.org/spec/lti-dl/claim/deep_linking_settings", {})
-            return_url = dl_settings.get("deep_link_return_url")
-
-            if not return_url:
-                raise HTTPException(400, "No return URL in deep linking settings")
-
-            # Build content item based on selection
-            activity_type = selection.get("activity_type", "confusion_tracker")
-
-            content_item = {
-                "type": "ltiResourceLink",
-                "title": "BluNote Confusion Tracker" if activity_type == "confusion_tracker" else "BluNote Analytics",
-                "text": "Real-time student confusion tracking with AI tutoring",
-                "url": f"{TOOL_BASE}/lti/launch",
-                "lineItem": {
-                    "scoreMaximum": 100,
-                    "label": "BluNote Participation",
-                    "resourceId": f"bluenote_{activity_type}",
-                    "tag": "participation"
-                },
-                "custom": {
-                    "activity_type": activity_type,
-                    "confusion_threshold": 25,
-                    "cooldown_minutes": 3
-                }
-            }
-
-            # Create deep linking response JWT
-            dl_response_claims = {
-                "iss": PLATFORM_CLIENT_ID,
-                "aud": claims["iss"],
-                "exp": int(time.time()) + 600,
-                "iat": int(time.time()),
-                "nbf": int(time.time()),
-                "nonce": claims.get("nonce"),
-                "azp": claims["iss"],
-                "https://purl.imsglobal.org/spec/lti/claim/message_type": "LtiDeepLinkingResponse",
-                "https://purl.imsglobal.org/spec/lti/claim/version": "1.3.0",
-                "https://purl.imsglobal.org/spec/lti/claim/deployment_id": claims.get("https://purl.imsglobal.org/spec/lti/claim/deployment_id"),
-                "https://purl.imsglobal.org/spec/lti-dl/claim/content_items": [content_item],
-                "https://purl.imsglobal.org/spec/lti-dl/claim/data": dl_settings.get("data")
-            }
-
-            # Sign with our private key
-            dl_jwt = lti_signer.sign(dl_response_claims)
-
-            # Return auto-submit form to platform
-            html = f"""
-            <!DOCTYPE html>
-            <html>
-            <body onload="document.forms[0].submit()">
-                <form method="POST" action="{return_url}">
-                    <input type="hidden" name="JWT" value="{dl_jwt}">
-                </form>
-            </body>
-            </html>
-            """
-
-            return HTMLResponse(content=html)
-
-    # ===== PLATFORM CONFIGURATION ENDPOINT =====
     add_platform_config_route():
-        @app.get("/lti/config")
-        async def get_tool_config(request: Request):
-            """
-            Return tool configuration for platform registration
-            """
-            base_url = str(request.url_for("get_tool_config")).replace("/lti/config", "")
-
-            config = {
-                "title": "BluNote - Student Confusion Tracker",
-                "description": "Real-time confusion tracking with AI-powered tutoring support",
-                "oidc_initiation_url": f"{base_url}/lti/oidc_login",
-                "target_link_uri": f"{base_url}/lti/launch",
-                "scopes": [
-                    "https://purl.imsglobal.org/spec/lti-nrps/scope/contextmembership.readonly",
-                    "https://purl.imsglobal.org/spec/lti-ags/scope/lineitem",
-                    "https://purl.imsglobal.org/spec/lti-ags/scope/lineitem.readonly",
-                    "https://purl.imsglobal.org/spec/lti-ags/scope/result.readonly",
-                    "https://purl.imsglobal.org/spec/lti-ags/scope/score"
-                ],
-                "extensions": [
-                    {
-                        "platform": "canvas.instructure.com",
-                        "settings": {
-                            "privacy_level": "public",
-                            "course_navigation": {
-                                "enabled": True,
-                                "text": "BluNote",
-                                "default": "enabled"
-                            }
-                        }
-                    }
-                ],
-                "public_jwk_url": f"{base_url}/lti/.well-known/jwks.json",
-                "custom_fields": {
-                    "confusion_threshold": "$Custom.confusion_threshold",
-                    "cooldown_minutes": "$Custom.cooldown_minutes"
-                },
-                "messages": [
-                    {
-                        "type": "LtiResourceLinkRequest",
-                        "target_link_uri": f"{base_url}/lti/launch",
-                        "label": "BluNote Confusion Tracker",
-                        "custom_parameters": {
-                            "activity": "confusion_tracker"
-                        }
-                    },
-                    {
-                        "type": "LtiDeepLinkingRequest",
-                        "target_link_uri": f"{base_url}/lti/launch",
-                        "label": "Add BluNote Activity"
-                    }
-                ]
-            }
-
-            return JSONResponse(content=config)
-
-        @app.get("/lti/.well-known/jwks.json")
-        async def get_jwks():
-            """
-            Return public keys for JWT verification
-            """
-            # Generate JWKS from our private key
-            from cryptography.hazmat.primitives import serialization
-            from cryptography.hazmat.backends import default_backend
-            import base64
-
-            # Load private key
-            private_key = serialization.load_pem_private_key(
-                LTI_PRIVATE_KEY_PEM.encode(),
-                password=None,
-                backend=default_backend()
-            )
-
-            # Get public key
-            public_key = private_key.public_key()
-            public_numbers = public_key.public_numbers()
-
-            # Convert to JWKS format
-            def int_to_base64url(n):
-                hex_n = format(n, 'x')
-                if len(hex_n) % 2:
-                    hex_n = '0' + hex_n
-                return base64.urlsafe_b64encode(
-                    bytes.fromhex(hex_n)
-                ).decode('ascii').rstrip('=')
-
-            jwks = {
-                "keys": [
-                    {
-                        "kty": "RSA",
-                        "alg": "RS256",
-                        "use": "sig",
-                        "kid": LTI_KID,
-                        "n": int_to_base64url(public_numbers.n),
-                        "e": int_to_base64url(public_numbers.e)
-                    }
-                ]
-            }
-
-            return JSONResponse(content=jwks)
-
-    # ===== HELPER FUNCTIONS =====
-    async def fetch_platform_config(issuer: str):
-        """Fetch and cache platform configuration"""
-        cache_key = f"platform_config:{issuer}"
-        cached = await token_cache.get(cache_key)
-
-        if cached:
-            return json.loads(cached)
-
-        # Fetch from well-known endpoint
-        well_known_url = f"{issuer}/.well-known/openid-configuration"
-        response = await http_client.get(well_known_url)
-        config = response.json()
-
-        # Cache for 1 hour
-        await token_cache.set(cache_key, json.dumps(config), ttl=3600)
-
-        return config
-
-    async def fetch_and_cache_jwks(jwks_url: str):
-        """Fetch and cache platform JWKS"""
-        cache_key = f"jwks:{jwks_url}"
-        cached = await token_cache.get(cache_key)
-
-        if cached:
-            return json.loads(cached)
-
-        response = await http_client.get(jwks_url)
-        jwks = response.json()
-
-        # Cache for 1 hour
-        await token_cache.set(cache_key, json.dumps(jwks), ttl=3600)
-
-        return jwks["keys"]
-
-    def find_platform_key(keys: list, kid: str):
-        """Find the right key by kid"""
-        for key in keys:
-            if key.get("kid") == kid:
-                return key
-        # If no kid match, try the first key
-        return keys[0] if keys else None
-
-    def is_instructor_role(roles: list) -> bool:
-        """Check if roles include instructor permissions"""
-        instructor_roles = [
-            "http://purl.imsglobal.org/vocab/lis/v2/membership#Instructor",
-            "http://purl.imsglobal.org/vocab/lis/v2/membership#ContentDeveloper",
-            "http://purl.imsglobal.org/vocab/lis/v2/institution/person#Faculty",
-            "http://purl.imsglobal.org/vocab/lis/v2/institution/person#Administrator"
-        ]
-        return any(role in roles for role in instructor_roles)
-
-    def is_student_role(roles: list) -> bool:
-        """Check if roles include student permissions"""
-        student_roles = [
-            "http://purl.imsglobal.org/vocab/lis/v2/membership#Learner",
-            "http://purl.imsglobal.org/vocab/lis/v2/institution/person#Student"
-        ]
-        return any(role in roles for role in student_roles)
-
-    # ===== EXECUTION =====
-    tool_config = configure_tool_registration()
-    implement_oidc_login()
-    implement_launch_handler()
-    implement_deep_linking_endpoint()
-    add_platform_config_route()
-
-    logger.info("LTI 1.3 flows implemented")
+        expose_oidc_login_url()
+        expose_launch_url()
+        expose_deep_linking_url()
+        expose_jwks_url()
 ```
 
-I'll continue with the remaining steps in the next part due to length constraints. Would you like me to continue with Steps 3-10?
+## 3. Replace In-Memory State with Redis/Postgres
+```pseudo
+function persist_state():
+    init_redis_pool(url=env.REDIS_URL, max_connections=20)
+    init_postgres_pool(dsn=env.POSTGRES_DSN, max_size=10)
+
+    run_migrations():
+        execute_sql("""
+            CREATE TABLE IF NOT EXISTS courses (
+                id TEXT PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT now(),
+                roster_override INTEGER,
+                threshold_percent INTEGER,
+                settings JSONB
+            );
+        """)
+        execute_sql("""
+            CREATE TABLE IF NOT EXISTS events (
+                id UUID PRIMARY KEY,
+                course_id TEXT REFERENCES courses(id),
+                user_id TEXT,
+                type TEXT,
+                payload JSONB,
+                occurred_at TIMESTAMP DEFAULT now()
+            ) USING timescaledb;
+        """)
+        execute_sql("""
+            CREATE TABLE IF NOT EXISTS tutoring_sessions (
+                id UUID PRIMARY KEY,
+                course_id TEXT,
+                user_id TEXT,
+                content JSONB,
+                delivered_at TIMESTAMP DEFAULT now()
+            );
+        """)
+
+    refactor_confused_event_pipeline():
+        on_confused(course_id, user_id, ts):
+            redis_key = f"presses:{course_id}"
+            redis.zadd(redis_key, score=ts, member=user_id)
+            redis.expire(redis_key, WINDOW_SEC * 2)
+            postgres.insert(events, {course_id, user_id, type="confused", occurred_at=ts})
+
+    compute_metrics(course_id, now):
+        redis_key = f"presses:{course_id}"
+        redis.zremrangebyscore(redis_key, -inf, now - WINDOW_MS)
+        unique_count = redis.zcard(redis_key)
+        roster = fetch_roster_size(course_id)
+        tutoring_count = postgres.count_recent(tutoring_sessions, course_id, window=WINDOW_MS)
+        return { unique_count, roster, tutoring_count }
+
+    fetch_roster_size(course_id):
+        auto = redis.get(f"presence:{course_id}")
+        if auto and auto >= MIN_AUTO_ROSTER:
+            return auto
+        row = postgres.select_one("SELECT roster_override FROM courses WHERE id = $1", course_id)
+        return row.roster_override or DEFAULT_ROSTER
+
+    update_roster_override(course_id, roster):
+        postgres.upsert(courses, {id: course_id, roster_override: roster})
+
+    persist_tutoring(course_id, user_id, content):
+        postgres.insert(tutoring_sessions, {course_id, user_id, content})
+        if content.includes_assets:
+            s3.upload(content.assets)
+        redis.set(f"tutoring:{user_id}", json(content), ttl=TUTORING_TTL)
+```
+
+## 4. Build NRPS & AGS Integrations
+```pseudo
+function integrate_platform_services():
+    load_platform_service_credentials()
+    validate_required_scopes([NRPS_SCOPE, AGS_SCOPE?])
+
+    sync_nrps_members(course_id, launch_claims):
+        nrps_url = launch_claims.nrps_context_url
+        if not nrps_url:
+            return
+        token = fetch_service_token(scope=NRPS_SCOPE)
+        members_response = http_get(nrps_url, headers={"Authorization": f"Bearer {token}"})
+        for member in members_response.members:
+            postgres.upsert(members_table, map_member_to_row(member))
+        redis.set(f"roster:{course_id}", len(members_response.members), ttl=ROSTER_CACHE_TTL)
+
+    refresh_nrps_job():
+        schedule_cron(every=30_minutes, task=sync_all_courses)
+        def sync_all_courses():
+            for course in postgres.select("SELECT id FROM courses"):
+                sync_nrps_members(course.id, lookup_launch_claims(course.id))
+
+    ensure_line_item(course_id, label):
+        token = fetch_service_token(scope=AGS_SCOPE)
+        line_items_url = launch_claims.lineitems_url
+        existing = http_get(line_items_url, headers=bearer(token))
+        if not find_line_item(existing, label):
+            http_post(line_items_url, body=build_line_item(label), headers=bearer(token))
+
+    submit_score(course_id, user_id, score):
+        token = fetch_service_token(scope=AGS_SCOPE)
+        line_item = ensure_line_item(course_id, label="BluNote Participation")
+        payload = build_score_document(user_id, score)
+        http_post(line_item.scores_url, body=payload, headers=bearer(token))
+
+    integrate_metrics_with_nrps(course_id):
+        roster_size = redis.get(f"roster:{course_id}") or count_members_in_db(course_id)
+        presence = redis.zcard(f"presence:{course_id}")
+        return max(roster_size, presence)
+```
+
+## 5. Productionize Tutoring Orchestrator
+```pseudo
+function productionize_tutoring():
+    load_provider_config(llm_api_key, model_name, fallback_model)
+    create_prompt_templates()
+
+    gather_context(course_id):
+        slides = postgres.select_recent(slides_table, course_id, limit=5)
+        confusion_events = postgres.select_recent(events, course_id, type="confused", window=15_minutes)
+        instructor_notes = postgres.select_recent(notes_table, course_id)
+        return {slides, confusion_events, instructor_notes}
+
+    generate_tutoring_content(user_id, context):
+        prompt = render_template("tutoring_prompt", context)
+        response = call_llm(model_name, prompt, temperature=0.3)
+        if response.error:
+            response = call_llm(fallback_model, prompt)
+        structured = parse_llm_response(response.text)
+        validate_structured_content(structured)
+        postgres.insert(tutoring_sessions, {user_id, course_id=context.course_id, content: structured})
+        enqueue_background_job(upload_assets, structured.assets)
+        return structured
+
+    upload_assets(assets):
+        for asset in assets:
+            s3.put_object(bucket=TUTORING_BUCKET, key=asset.key, body=asset.blob, metadata=asset.meta)
+
+    deliver_content(course_id, confused_users):
+        context = gather_context(course_id)
+        for user_id in confused_users:
+            content = generate_tutoring_content(user_id, context)
+            socket.emit_to_user(user_id, event="tutoring", payload=content)
+        record_trigger_event(course_id, confused_users)
+
+    record_trigger_event(course_id, users):
+        postgres.insert(events, {course_id, type="tutoring_trigger", payload={users}})
+```
+
+## 6. Add Observability & Safeguards
+```pseudo
+function add_observability():
+    configure_structured_logger(service_name="blunote-api", sink=stdout)
+    add_request_id_middleware()
+    wrap_fastapi_with_logging_middleware(mask_pii=True)
+    log_socket_events(events=["connect", "disconnect", "trigger", "tutoring"])
+
+    integrate_metrics():
+        install_prometheus_instrumentator()
+        instrument_fastapi_routes(histogram_buckets=[0.1,0.25,0.5,1,2,5])
+        instrument_redis_client()
+        instrument_postgres_pool()
+        emit_custom_gauges(confusion_pct, connected_users)
+
+    add_security_headers():
+        set_csp(policy="default-src 'self'; connect-src 'self' wss://*")
+        enable_hsts(max_age=31536000)
+        set_referrer_policy("strict-origin-when-cross-origin")
+        enable_x_xss_protection()
+
+    implement_error_handling():
+        register_exception_handler(Exception, log_and_return_500)
+        integrate_sentry_or_equivalent(dsn=env.SENTRY_DSN)
+        add_validation_error_handler(return_422_json)
+
+    run_pen_test_checklist():
+        execute_dependency_audit()
+        run_security_scans(bandit, npm_audit)
+        document_findings()
+```
+
+## 7. Create Dev/Prod Tooling & Deployment
+```pseudo
+function build_tooling():
+    write_docker_compose():
+        services = {
+            api: {build: "app/server-py", env_file: ".env", ports: ["4000:4000"], depends_on: [redis, postgres]},
+            web: {build: "app/web", ports: ["5173:5173"], env_file: "app/web/.env", depends_on: [api]},
+            redis: {image: "redis:7", ports: ["6379:6379"]},
+            postgres: {image: "postgres:15", ports: ["5432:5432"], environment: postgres_env, volumes: ["pgdata:/var/lib/postgresql/data"]}
+        }
+        write_yaml("docker-compose.yml", services)
+
+    add_make_targets():
+        makefile.add_target("setup", cmds=["python -m venv", "pip install -r", "npm install"])
+        makefile.add_target("dev", cmds=["docker-compose up"])
+        makefile.add_target("test", cmds=["pytest", "npm test"])
+        makefile.add_target("deploy", cmds=["terraform apply", "helm upgrade"])
+
+    configure_ci_pipeline():
+        workflow = github_actions()
+        workflow.add_job("lint", steps=[checkout(), setup_python(), install_backend_deps(), run_flake8(), run_eslint()])
+        workflow.add_job("test", needs="lint", steps=[checkout(), setup_services_with_docker(), run_pytest(), run_npm_test()])
+        workflow.add_job("build", needs="test", steps=[build_frontend(), build_backend_image()])
+        workflow.add_job("deploy", needs="build", if=on_main_branch, steps=[assume_role(), helm_deploy()])
+
+    create_infrastructure_scripts():
+        terraform.define_module("network", resources=[vpc, subnets, security_groups])
+        terraform.define_module("database", resources=[aurora_postgres, parameter_groups])
+        terraform.define_module("cache", resources=[elasticache_redis])
+        terraform.define_module("secrets", resources=[secrets_manager_entries])
+        terraform.define_module("app", resources=[ecs_service_or_kubernetes])
+        scripts/provision.sh orchestrates apply order
+```
+
+## 8. Expand Instructor UX & Analytics
+```pseudo
+function enhance_instructor_dashboard():
+    design_pause_acknowledge_flow():
+        map_user_story("Instructor acknowledges alert and logs explanation")
+        define API schema {action: "pause", note: string, acknowledged_by: user}
+
+    extend_backend_actions_api():
+        create_route(POST, "/api/course/{id}/actions", auth=token)
+        validate_payload_against_schema()
+        write_action_to_events_table()
+        broadcast_action_over_socket()
+
+    implement_frontend_components():
+        add `AlertHistoryPanel` component pulling `/api/course/{id}/events?action`
+        add `AcknowledgeModal` with textarea + submit button
+        wire submit to POST action, optimistic update state
+        display acknowledgment timestamp + instructor name in list
+
+    build_analytics_views():
+        backend_query = "SELECT date_trunc('minute', occurred_at) AS bucket, COUNT(*) FROM events WHERE type='confused' GROUP BY bucket ORDER BY bucket"
+        convert_query_results_to_series()
+        expose endpoint `/api/course/{id}/analytics/confusion`
+        frontend fetches series and renders area chart (e.g., Recharts)
+        add filters by timeframe (10, 30, 60 minutes)
+
+    add_empty_states_and_accessibility():
+        show friendly message when no alerts yet
+        ensure components announce updates via aria-live regions
+```
+
+## 9. Validate UX, Accessibility, and Testing
+```pseudo
+function finalize_user_experience():
+    run_accessibility_audit():
+        execute_axe_on_frontend()
+        address reported violations
+        add unit tests asserting aria-label presence
+
+    strengthen_keyboard_support():
+        ensure tab order on modal/dialog controls
+        add keyboard shortcuts for instructor acknowledge
+        write Cypress test to navigate UI using keyboard only
+
+    implement_i18n_framework():
+        integrate i18next (frontend) and gettext (backend)
+        wrap UI strings with translation function
+        load locale files based on user preference from LTI launch
+        add fallback to English if translation missing
+
+    expand_testing():
+        backend: add pytest modules for metrics math, LTI validation, token guards
+        backend: add async integration test using TestClient + redis/postgres fixtures
+        frontend: write React Testing Library tests for Student/Instructor flows
+        e2e: add Playwright spec launching dev server, simulating two students + instructor scenario
+        integrate test suite into CI pipeline jobs
+
+    document QA checklist():
+        include cross-browser matrix
+        include responsive breakpoints verification
+```
+
+## 10. Monitoring, Alerting, and Pilot Rollout
+```pseudo
+function launch_pilot():
+    provision_monitoring():
+        deploy Prometheus + Grafana dashboards for API latency, socket connections, LTI failures
+        configure log shipping to centralized store (e.g., CloudWatch, ELK)
+
+    configure_alerting():
+        define alerts for error_rate > 2%, websocket_disconnect_spike, redis_latency
+        route critical alerts to on-call Slack channel + PagerDuty
+
+    create_runbook():
+        document how to restart services, roll back deploy, contact platform admins
+        include dashboard URLs and log query templates
+        store runbook in shared knowledge base
+
+    execute_pilot():
+        select pilot institutions and courses
+        schedule onboarding sessions and collect consent
+        enable feature flags for pilot users
+        monitor dashboards daily, log pilot incidents
+        hold weekly review to capture feedback and prioritize fixes
+
+    plan_general_availability():
+        synthesize pilot feedback into backlog
+        update documentation and support materials
+        confirm scalability tests pass
+```
