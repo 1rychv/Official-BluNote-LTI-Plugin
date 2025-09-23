@@ -33,8 +33,8 @@ class RedisOnlyCourseState:
     def redis(self):
         return self._get_redis()
 
-    async def record_confused_event(self, user_id: str, ts: Optional[float] = None) -> bool:
-        """Record a confusion event in Redis."""
+    async def record_confused_event(self, user_id: str, ts: Optional[float] = None, slide_context=None) -> bool:
+        """Record a confusion event in Redis with optional slide context."""
         if ts is None:
             ts = time.time() * 1000
 
@@ -51,6 +51,15 @@ class RedisOnlyCourseState:
             "timestamp": ts,
             "occurred_at": datetime.fromtimestamp(ts / 1000).isoformat()
         }
+
+        # Add slide context if available
+        if slide_context:
+            event["slide_context"] = {
+                "slide_number": slide_context.slide_number,
+                "slide_title": slide_context.slide_title,
+                "slide_timestamp": slide_context.timestamp.isoformat() if slide_context.timestamp else None
+            }
+
         await self.redis.lpush(log_key, json.dumps(event))
         await self.redis.expire(log_key, 24 * 3600)  # Keep for 24 hours
 

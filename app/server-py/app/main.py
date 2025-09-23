@@ -112,14 +112,31 @@ async def compute_metrics(course_id: str) -> Dict[str, Any]:
     return metrics
 
 
-def generate_tutoring_stub(course_id: str) -> Dict[str, Any]:
+async def generate_tutoring_stub(course_id: str) -> Dict[str, Any]:
+    """Generate tutoring content with slide context (ready for Step 5 enhancement)"""
+    # Get current slide context for better tutoring
+    from app.services.slide_service import slide_service
+    slide_context = await slide_service.get_slide_context(course_id)
+
+    # Basic context-aware content
+    if slide_context.slide_title:
+        title = f"Help with {slide_context.slide_title}"
+        text = f"It looks like several students are confused about {slide_context.slide_title}. Here's a quick explanation to help clarify this topic."
+    else:
+        title = "Quick Explanation"
+        text = "It looks like several students are confused. Here is a concise recap to help with the current topic."
+
     return {
         "courseId": course_id,
-        "title": "Quick Explanation",
-        "text": "It looks like several students are confused. Here is a concise recap: Focus on key concept X, break it into steps A→B→C, and practice with the example below.",
+        "title": title,
+        "text": text,
+        "slide_context": {
+            "slide_number": slide_context.slide_number,
+            "slide_title": slide_context.slide_title
+        } if slide_context.slide_number else None,
         "practice": [
-            {"q": "Explain concept X in your own words.", "a": "Free response"},
-            {"q": "Which step comes after B?", "a": "C"},
+            {"q": "Can you explain this concept in your own words?", "a": "Free response"},
+            {"q": "What's the main point of this section?", "a": "Think about the key takeaway"},
         ],
     }
 
@@ -140,7 +157,7 @@ async def maybe_trigger(course_id: str) -> None:
 
         # Generate and persist tutoring content
         for user_id in confused_users:
-            content = generate_tutoring_stub(course_id)
+            content = await generate_tutoring_stub(course_id)
             await course_state.persist_tutoring_content(user_id, content)
 
             # Notify connected sockets for this user
@@ -157,7 +174,7 @@ async def maybe_trigger(course_id: str) -> None:
 
 
 async def record_press(course_id: str, user_id: str) -> bool:
-    """Record a confusion press with debouncing."""
+    """Record a confusion press with debouncing and slide context."""
     now_ms = time.time() * 1000
     last = last_press_by_user.get(user_id, 0)
 
@@ -168,9 +185,13 @@ async def record_press(course_id: str, user_id: str) -> bool:
     # Update debounce tracker
     last_press_by_user[user_id] = now_ms
 
-    # Record in persistent storage
+    # Get current slide context
+    from app.services.slide_service import slide_service
+    slide_context = await slide_service.get_slide_context(course_id)
+
+    # Record in persistent storage with slide context
     course_state = get_course_state(course_id)
-    await course_state.record_confused_event(user_id, now_ms)
+    await course_state.record_confused_event(user_id, now_ms, slide_context=slide_context)
 
     return True
 
@@ -341,6 +362,60 @@ async def on_presence(sid):
     await course_state.update_presence(user_id)
 
 
+@sio.on('update_slide')
+async def on_update_slide(sid, data):
+    """Handle slide update from instructor"""
+    info = sid_map.get(sid)
+    if not info:
+        await sio.emit('error', {'message': 'Unauthorized'}, to=sid)
+        return
+
+    # Check if user is an instructor
+    if not info.get('is_instructor', False):
+        await sio.emit('error', {'message': 'Only instructors can update slides'}, to=sid)
+        return
+
+    course_id = info.get('course_id')
+    user_id = info.get('user_id')
+
+    # Validate data
+    slide_number = data.get('slide_number', 1)
+    slide_title = data.get('slide_title', 'Untitled Slide')
+
+    try:
+        # Store slide information
+        from app.services.slide_service import slide_service
+        slide_info = await slide_service.store_current_slide(
+            course_id=course_id,
+            slide_number=slide_number,
+            slide_title=slide_title,
+            updated_by=user_id
+        )
+
+        # Broadcast slide change to all course participants
+        slide_data = {
+            'slide_number': slide_info.slide_number,
+            'slide_title': slide_info.slide_title,
+            'updated_at': slide_info.updated_at.isoformat(),
+            'updated_by': slide_info.updated_by
+        }
+
+        await sio.emit('slide_changed', slide_data, room=f'course:{course_id}')
+        await sio.emit('slide_update_response', {
+            'status': 'success',
+            'slide': slide_data
+        }, to=sid)
+
+        logger.info(f"Slide updated in course {course_id}: Slide {slide_number} - {slide_title}")
+
+    except Exception as e:
+        logger.error(f"Failed to update slide: {e}")
+        await sio.emit('slide_update_response', {
+            'status': 'error',
+            'message': str(e)
+        }, to=sid)
+
+
 # Assemble ASGI app with Socket.IO mounted
 app = socketio.ASGIApp(sio, other_asgi_app=fastapi_app)
 
@@ -348,10 +423,12 @@ app = socketio.ASGIApp(sio, other_asgi_app=fastapi_app)
 from app.lti.routes import router as lti_router
 from app.api.routes import router as api_router
 from app.api.services_routes import router as services_router
+from app.api.slide_routes import router as slide_router
 
 fastapi_app.include_router(lti_router, prefix='/lti')
 fastapi_app.include_router(api_router, prefix='/api')
 fastapi_app.include_router(services_router)
+fastapi_app.include_router(slide_router)
 
 
 if __name__ == '__main__':

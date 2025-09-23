@@ -20,6 +20,10 @@ export default function Instructor() {
   const [alerts, setAlerts] = useState([])
   const [roster, setRoster] = useState(20)
   const [savingRoster, setSavingRoster] = useState(false)
+  const [currentSlide, setCurrentSlide] = useState({ slide_number: 1, slide_title: '' })
+  const [slideNumber, setSlideNumber] = useState(1)
+  const [slideTitle, setSlideTitle] = useState('')
+  const [updatingSlide, setUpdatingSlide] = useState(false)
 
   useEffect(() => {
     const s = io(API_BASE, {
@@ -30,6 +34,15 @@ export default function Instructor() {
     s.on('disconnect', () => setConnected(false))
     s.on('metrics', (m) => setMetrics(m))
     s.on('trigger', (t) => setAlerts((prev) => [{ at: t.at, pct: t.pct }, ...prev].slice(0, 5)))
+    s.on('slide_changed', (slide) => setCurrentSlide(slide))
+    s.on('slide_update_response', (response) => {
+      setUpdatingSlide(false)
+      if (response.status === 'success') {
+        setCurrentSlide(response.slide)
+      } else {
+        console.error('Slide update failed:', response.message)
+      }
+    })
     setSocket(s)
     return () => s.disconnect()
   }, [courseId, name])
@@ -45,6 +58,16 @@ export default function Instructor() {
     } finally {
       setSavingRoster(false)
     }
+  }
+
+  const updateSlide = () => {
+    if (!socket || !slideNumber || !slideTitle.trim()) return
+
+    setUpdatingSlide(true)
+    socket.emit('update_slide', {
+      slide_number: Number(slideNumber),
+      slide_title: slideTitle.trim()
+    })
   }
 
   return (
@@ -77,6 +100,51 @@ export default function Instructor() {
             <label className="muted">Roster size (manual override)</label>
             <input type="number" value={roster} onChange={e => setRoster(e.target.value)} style={{ width: 100, padding:'6px 8px', borderRadius:8, border:'1px solid var(--border)', background:'transparent', color:'var(--text)' }} />
             <button className="badge" onClick={saveRoster} disabled={savingRoster}>{savingRoster ? 'Saving…' : 'Save'}</button>
+          </div>
+        </div>
+
+        <div className="card">
+          <h3 style={{marginTop:0}}>Current Slide</h3>
+          {currentSlide.slide_number && (
+            <div className="muted" style={{marginBottom: 12}}>
+              Currently showing: <b>Slide {currentSlide.slide_number}</b> - {currentSlide.slide_title}
+            </div>
+          )}
+
+          <div className="space" />
+          <div className="row">
+            <label className="muted">Slide Number</label>
+            <input
+              type="number"
+              value={slideNumber}
+              onChange={e => setSlideNumber(e.target.value)}
+              min="1"
+              style={{ width: 100, padding:'6px 8px', borderRadius:8, border:'1px solid var(--border)', background:'transparent', color:'var(--text)' }}
+            />
+          </div>
+
+          <div className="space" />
+          <div className="row">
+            <label className="muted">Slide Topic/Title</label>
+            <input
+              type="text"
+              value={slideTitle}
+              onChange={e => setSlideTitle(e.target.value)}
+              placeholder="e.g., Supply and Demand"
+              style={{ flexGrow: 1, padding:'6px 8px', borderRadius:8, border:'1px solid var(--border)', background:'transparent', color:'var(--text)' }}
+            />
+          </div>
+
+          <div className="space" />
+          <div className="row">
+            <button
+              className="badge"
+              onClick={updateSlide}
+              disabled={updatingSlide || !slideTitle.trim()}
+              style={{ background: updatingSlide || !slideTitle.trim() ? 'var(--border)' : 'var(--primary)' }}
+            >
+              {updatingSlide ? 'Updating…' : 'Update Current Slide'}
+            </button>
           </div>
         </div>
 
