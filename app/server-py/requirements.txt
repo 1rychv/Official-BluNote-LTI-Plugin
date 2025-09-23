@@ -9,3 +9,5 @@ slowapi==0.1.9
 redis==5.0.7
 pyjwt[crypto]==2.8.0
 cryptography==41.0.7
+supabase==2.3.4
+postgrest==0.16.3

@@ -12,6 +12,7 @@ import socketio
 
 from app.database.connection import init_redis, init_postgres, close_connections, get_postgres
 from app.database.redis_models import RedisOnlyAppState
+from app.database.supabase_connection import init_supabase, SupabaseAppState
 
 
 load_dotenv()
@@ -39,30 +40,65 @@ fastapi_app.add_middleware(
 @fastapi_app.on_event("startup")
 async def startup_event():
     """Initialize database connections and run migrations."""
+    global state
     logger.info("Starting up BluNote LTI backend...")
+
+    use_supabase = os.getenv("USE_SUPABASE", "false").lower() == "true"
+
     try:
-        await init_redis()
-        await init_postgres()
+        if use_supabase:
+            # Initialize Supabase
+            logger.info("Initializing with Supabase backend...")
+            await init_supabase()
 
-        # Run migrations only if PostgreSQL is available
-        postgres_pool = get_postgres()
-        if postgres_pool:
+            # Run Supabase migrations
             try:
-                from app.database.migrations import run_migrations
-                await run_migrations(postgres_pool)
-                logger.info("Database initialization completed successfully with PostgreSQL")
-            except ImportError:
-                logger.info("PostgreSQL migrations not available, continuing with Redis-only mode")
+                from app.database.supabase_connection import get_supabase
+                from app.database.supabase_migrations import run_supabase_migrations, create_rpc_functions
 
-            # Start roster sync job if PostgreSQL is available
-            try:
-                from app.lti.services import roster_sync_job
-                await roster_sync_job.start()
-                logger.info("Started NRPS roster synchronization job")
+                supabase_client = get_supabase()
+                await run_supabase_migrations(supabase_client)
+                await create_rpc_functions(supabase_client)
+
+                # Initialize Supabase Storage
+                from app.database.supabase_connection import get_storage_helper
+                storage_helper = get_storage_helper()
+                await storage_helper.ensure_bucket_exists()
+
+                state = SupabaseAppState()
+                logger.info("Database initialization completed successfully with Supabase")
             except Exception as e:
-                logger.warning(f"Could not start roster sync job: {e}")
-        else:
-            logger.info("Database initialization completed successfully (Redis-only mode)")
+                logger.warning(f"Supabase initialization failed: {e}. Falling back to Redis mode.")
+                use_supabase = False
+
+        if not use_supabase:
+            # Fallback to Redis + PostgreSQL
+            logger.info("Initializing with Redis + PostgreSQL backend...")
+            await init_redis()
+            await init_postgres()
+
+            # Run migrations only if PostgreSQL is available
+            postgres_pool = get_postgres()
+            if postgres_pool:
+                try:
+                    from app.database.migrations import run_migrations
+                    await run_migrations(postgres_pool)
+                    logger.info("Database initialization completed successfully with PostgreSQL")
+                except ImportError:
+                    logger.info("PostgreSQL migrations not available, continuing with Redis-only mode")
+
+                # Start roster sync job if PostgreSQL is available
+                try:
+                    from app.lti.services import roster_sync_job
+                    await roster_sync_job.start()
+                    logger.info("Started NRPS roster synchronization job")
+                except Exception as e:
+                    logger.warning(f"Could not start roster sync job: {e}")
+            else:
+                logger.info("Database initialization completed successfully (Redis-only mode)")
+
+            state = RedisOnlyAppState()
+
     except Exception as e:
         logger.error(f"Failed to initialize databases: {e}")
         raise
@@ -87,8 +123,8 @@ async def shutdown_event():
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins=[ALLOWED_ORIGIN])
 
 
-# Initialize persistent state
-state = RedisOnlyAppState()
+# Initialize persistent state (will be determined at startup)
+state = None
 
 # For debouncing - keep in memory as it's short-lived
 last_press_by_user: Dict[str, float] = {}
@@ -199,33 +235,55 @@ async def record_press(course_id: str, user_id: str) -> bool:
 @fastapi_app.get('/health')
 async def health():
     """Health check endpoint with database connectivity status."""
-    try:
-        # Test Redis connectivity
-        from app.database.connection import get_redis
-        redis_client = get_redis()
-        await redis_client.ping()
-        redis_status = "ok"
-    except Exception as e:
-        redis_status = f"error: {str(e)}"
+    use_supabase = os.getenv("USE_SUPABASE", "false").lower() == "true"
 
-    try:
-        # Test PostgreSQL connectivity
-        postgres_pool = get_postgres()
-        if postgres_pool:
-            async with postgres_pool.acquire() as conn:
-                await conn.fetchval("SELECT 1")
-            postgres_status = "ok"
-        else:
-            postgres_status = "not configured"
-    except Exception as e:
-        postgres_status = f"error: {str(e)}"
+    if use_supabase:
+        try:
+            # Test Supabase connectivity
+            from app.database.supabase_connection import get_supabase
+            supabase_client = get_supabase()
 
-    return {
-        "ok": redis_status == "ok" and (postgres_status == "ok" or postgres_status == "not configured"),
-        "time": time.strftime('%Y-%m-%dT%H:%M:%S'),
-        "redis": redis_status,
-        "postgres": postgres_status
-    }
+            # Simple query to test connectivity
+            result = supabase_client.table("schema_migrations").select("count", count="exact").limit(1).execute()
+            supabase_status = "ok"
+        except Exception as e:
+            supabase_status = f"error: {str(e)}"
+
+        return {
+            "ok": supabase_status == "ok",
+            "time": time.strftime('%Y-%m-%dT%H:%M:%S'),
+            "backend": "supabase",
+            "supabase": supabase_status
+        }
+    else:
+        try:
+            # Test Redis connectivity
+            from app.database.connection import get_redis
+            redis_client = get_redis()
+            await redis_client.ping()
+            redis_status = "ok"
+        except Exception as e:
+            redis_status = f"error: {str(e)}"
+
+        try:
+            # Test PostgreSQL connectivity
+            postgres_pool = get_postgres()
+            if postgres_pool:
+                async with postgres_pool.acquire() as conn:
+                    await conn.fetchval("SELECT 1")
+                postgres_status = "ok"
+            else:
+                postgres_status = "not configured"
+        except Exception as e:
+            postgres_status = f"error: {str(e)}"
+
+        return {
+            "ok": redis_status == "ok" and (postgres_status == "ok" or postgres_status == "not configured"),
+            "time": time.strftime('%Y-%m-%dT%H:%M:%S'),
+            "backend": "redis+postgres",
+            "redis": redis_status,
+            "postgres": postgres_status
+        }
 
 
 # API routes moved to app.api.routes module with authentication
