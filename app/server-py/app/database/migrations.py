@@ -63,6 +63,21 @@ MIGRATIONS = [
     """
     CREATE INDEX IF NOT EXISTS idx_members_course_id
     ON members(course_id);
+    """,
+    # Migration 9: Rename members table and add columns for NRPS
+    """
+    ALTER TABLE members RENAME TO course_members;
+    """,
+    """
+    ALTER TABLE course_members
+    ADD COLUMN IF NOT EXISTS given_name TEXT,
+    ADD COLUMN IF NOT EXISTS family_name TEXT,
+    ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Active';
+    """,
+    # Migration 11: Update course table for AGS/NRPS
+    """
+    ALTER TABLE courses
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT now();
     """
 ]
 
@@ -110,6 +125,7 @@ async def reset_database(pool: asyncpg.Pool) -> None:
     """Reset database by dropping all tables (for development only)."""
     async with pool.acquire() as conn:
         await conn.execute("DROP TABLE IF EXISTS schema_migrations CASCADE;")
+        await conn.execute("DROP TABLE IF EXISTS course_members CASCADE;")
         await conn.execute("DROP TABLE IF EXISTS members CASCADE;")
         await conn.execute("DROP TABLE IF EXISTS tutoring_sessions CASCADE;")
         await conn.execute("DROP TABLE IF EXISTS events CASCADE;")

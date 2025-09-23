@@ -84,3 +84,17 @@ def get_redis() -> redis.Redis:
 def get_postgres():
     """Get PostgreSQL pool."""
     return postgres_pool
+
+
+async def get_db_connection():
+    """Get a PostgreSQL database connection from the pool."""
+    if not postgres_pool:
+        raise RuntimeError("PostgreSQL not initialized. Check POSTGRES_DSN environment variable.")
+    return await postgres_pool.acquire()
+
+
+async def get_redis_connection() -> redis.Redis:
+    """Get a Redis connection from the pool."""
+    if not redis_pool:
+        raise RuntimeError("Redis not initialized")
+    return redis.Redis(connection_pool=redis_pool)

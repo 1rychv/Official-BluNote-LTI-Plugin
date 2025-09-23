@@ -12,12 +12,11 @@ logger = logging.getLogger(__name__)
 class SecurityConfig:
     """Security configuration settings."""
 
+    # Required fields (no defaults)
     # JWT Configuration
     lti_private_key_pem: str
     lti_kid: str
     jwt_signing_secret: str
-    jwt_algorithm: str = "HS256"
-    lti_algorithm: str = "RS256"
 
     # Platform Configuration
     platform_issuer: str
@@ -27,6 +26,14 @@ class SecurityConfig:
 
     # Security Settings
     allowed_origins: List[str]
+
+    # Application Settings
+    frontend_base_url: str
+    tool_base_url: str
+
+    # Optional fields (with defaults)
+    jwt_algorithm: str = "HS256"
+    lti_algorithm: str = "RS256"
     session_timeout: int = 300  # 5 minutes
     max_requests_per_min: int = 60
     max_confusion_per_user: int = 3
@@ -37,10 +44,6 @@ class SecurityConfig:
 
     # PostgreSQL Configuration
     postgres_url: Optional[str] = None
-
-    # Application Settings
-    frontend_base_url: str
-    tool_base_url: str
 
 def load_security_config() -> SecurityConfig:
     """Load security configuration from environment or vault."""

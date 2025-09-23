@@ -174,6 +174,9 @@ async def lti_launch(id_token: str = Form(...), state: str = Form(None)):
     # Cache launch data for 10 minutes
     await token_cache.set(f"launch:{launch_id}", json.dumps(launch_data, default=str), ttl=600)
 
+    # Store course settings with service URLs in database
+    await _store_course_settings(claims, course_info["id"])
+
     # Handle different message types
     if message_type == "LtiResourceLinkRequest":
         return await _handle_resource_link_request(claims, launch_data)
@@ -480,3 +483,35 @@ async def _handle_deep_linking_request(claims: Dict[str, Any], launch_id: str) -
     # Redirect to resource selection page
     selection_url = f"{lti_config.TOOL_BASE}/lti/deep_linking/{launch_id}"
     return RedirectResponse(url=selection_url, status_code=302)
+
+
+async def _store_course_settings(claims: Dict[str, Any], course_id: str) -> None:
+    """Store course settings including NRPS and AGS URLs"""
+    from ..database.connection import get_db_connection
+    from datetime import datetime
+
+    # Extract service URLs
+    nrps = claims.get("https://purl.imsglobal.org/spec/lti-nrps/claim/namesroleservice", {})
+    ags = claims.get("https://purl.imsglobal.org/spec/lti-ags/claim/endpoint", {})
+
+    settings = {
+        "platform_issuer": claims["iss"],
+        "deployment_id": claims.get("https://purl.imsglobal.org/spec/lti/claim/deployment_id"),
+        "nrps_url": nrps.get("context_memberships_url"),
+        "ags_url": ags.get("lineitems"),
+        "ags_lineitem_url": ags.get("lineitem"),
+        "client_id": claims.get("aud") if isinstance(claims.get("aud"), str) else claims.get("aud", [None])[0]
+    }
+
+    # Store in database
+    conn = await get_db_connection()
+    try:
+        await conn.execute("""
+            INSERT INTO courses (id, created_at, updated_at, settings)
+            VALUES ($1, $2, $2, $3)
+            ON CONFLICT (id) DO UPDATE SET
+                updated_at = EXCLUDED.updated_at,
+                settings = courses.settings || EXCLUDED.settings
+        """, course_id, datetime.utcnow(), json.dumps(settings))
+    finally:
+        await conn.close()

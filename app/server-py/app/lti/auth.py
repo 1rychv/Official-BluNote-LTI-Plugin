@@ -165,7 +165,8 @@ class LTIAuthenticator:
 
     def _extract_ags_url(self, claims: Dict[str, Any]) -> Optional[str]:
         ags = claims.get("https://purl.imsglobal.org/spec/lti-ags/claim/endpoint", {})
-        return ags.get("lineitem")
+        # Return lineitems container URL for creating/managing line items
+        return ags.get("lineitems")
 
     def _is_instructor_role(self, roles: list) -> bool:
         instructor_roles = [

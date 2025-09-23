@@ -53,6 +53,14 @@ async def startup_event():
                 logger.info("Database initialization completed successfully with PostgreSQL")
             except ImportError:
                 logger.info("PostgreSQL migrations not available, continuing with Redis-only mode")
+
+            # Start roster sync job if PostgreSQL is available
+            try:
+                from app.lti.services import roster_sync_job
+                await roster_sync_job.start()
+                logger.info("Started NRPS roster synchronization job")
+            except Exception as e:
+                logger.warning(f"Could not start roster sync job: {e}")
         else:
             logger.info("Database initialization completed successfully (Redis-only mode)")
     except Exception as e:
@@ -64,6 +72,15 @@ async def startup_event():
 async def shutdown_event():
     """Close database connections."""
     logger.info("Shutting down BluNote LTI backend...")
+
+    # Stop roster sync job if running
+    try:
+        from app.lti.services import roster_sync_job
+        await roster_sync_job.stop()
+        logger.info("Stopped NRPS roster synchronization job")
+    except Exception:
+        pass
+
     await close_connections()
     logger.info("Shutdown completed")
 
@@ -330,9 +347,11 @@ app = socketio.ASGIApp(sio, other_asgi_app=fastapi_app)
 # ------------------- LTI Gateway (Complete Implementation) --------------------
 from app.lti.routes import router as lti_router
 from app.api.routes import router as api_router
+from app.api.services_routes import router as services_router
 
 fastapi_app.include_router(lti_router, prefix='/lti')
 fastapi_app.include_router(api_router, prefix='/api')
+fastapi_app.include_router(services_router)
 
 
 if __name__ == '__main__':

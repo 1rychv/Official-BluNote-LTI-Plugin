@@ -187,3 +187,7 @@ async def student_guard(
 def websocket_guard(config: SecurityConfig, cache=None):
     """Create WebSocket guard for SocketIO."""
     return WebSocketGuard(config, cache)
+
+
+# Alias for compatibility with services routes
+get_current_user = rest_guard

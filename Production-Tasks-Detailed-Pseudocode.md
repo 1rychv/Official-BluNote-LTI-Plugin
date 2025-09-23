@@ -75,7 +75,7 @@ function complete_lti_flows():
         expose_jwks_url()
 ```
 
-## 3. Replace In-Memory State with Redis/Postgres
+## ~~3. Replace In-Memory State with Redis/Postgres~~ ✅ COMPLETED
 ```pseudo
 function persist_state():
     init_redis_pool(url=env.REDIS_URL, max_connections=20)
